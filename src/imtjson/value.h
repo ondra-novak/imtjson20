@@ -22,6 +22,8 @@ enum class Type : char {
     object
 };
 
+template<typename T, typename Result, typename ... Args>
+concept InvokableResult = std::constructible_from<Result, decltype(std::declval<T>()(std::declval<Args>()...))>;
 
 class RefCounted {
 public:
@@ -105,6 +107,15 @@ public:
     Container(const Container &) = delete;
     Container &operator=(const Container &) = delete;
 
+    constexpr bool operator==(const Container &other)  const {
+        if (_sz != other._sz) return false;
+        if (_ptr == other._ptr) return true;
+        for (std::size_t i = 0; i < _sz; ++i) {
+            if (_ptr[i] != other._ptr[i]) return false;
+        }
+        return true;
+    }
+
 
     static PContainer<T> create(const T *ptr, std::size_t sz) {
         AllocInfo info = {sz};
@@ -131,7 +142,7 @@ protected:
 
     struct AllocInfo { // @suppress("Miss copy constructor or assignment operator")
         std::size_t sz;
-        T *buffer;
+        T *buffer = nullptr;
     };
 
 
@@ -159,7 +170,7 @@ protected:
         info.buffer = reinterpret_cast<T *>(reinterpret_cast<char *>(out) + sz);
         return out;
     }
-    void operator delete(void *ptr, AllocInfo &info) {
+    void operator delete(void *ptr, AllocInfo &) {
         ::operator delete(ptr);
     }
 
@@ -220,7 +231,8 @@ enum class Storage : unsigned char {
     array = 45,
     object = 46,
     string_ref = 47,
-    custom_type = 48
+    number_ref = 48,
+    custom_type = 49
 
 };
 
@@ -243,6 +255,13 @@ struct DirectStorage: StorageBase {
 class Undefined {};
 class IsNumber {};
 class Value;
+
+constexpr std::string_view infinity="∞";
+constexpr std::string_view neg_infinity="-∞";
+constexpr std::string_view true_value="true";
+constexpr std::string_view false_value="false";
+constexpr std::string_view null_value="null";
+constexpr std::string_view undefined_value="(undefined)";
 
 ///Interface to create custom values
 /**
@@ -300,6 +319,12 @@ public:
      * @return item at given key, if doesn't exists, function must return undefined
      */
     virtual const Value &operator[](const std::string_view &key) const;
+
+
+    ///Optional, compare two custom values
+    virtual bool operator==(const AbstractCustomValue &other) const {
+        return this == &other;
+    }
 
 
 };
@@ -390,7 +415,7 @@ public:
     template<typename Fn>
     constexpr decltype(auto) visit(Fn &&fn) const;
 
-    Type type() const;
+    constexpr Type type() const;
 
     const Value &operator[](const std::string_view &key) const;
     const Value &operator[](unsigned int index) const;
@@ -623,12 +648,18 @@ public:
     Value filter(Fn fn);
     template<std::invocable<KeyValue> Fn>
     Value filter(Fn fn);
-    template<std::invocable<Value> Fn>
+    template<InvokableResult<Value, Value> Fn>
     Value map(Fn fn);
-    template<std::invocable<KeyValue> Fn>
+    template<InvokableResult<KeyValue, KeyValue> Fn>
+    Value map(Fn fn);
+    template<InvokableResult<Value, KeyValue> Fn>
+    Value map(Fn fn);
+    template<InvokableResult<KeyValue, Value> Fn>
     Value map(Fn fn);
 
+    constexpr bool operator==(const Value &other) const;
 
+    constexpr Storage get_storage() const {return _storage;}
 
 protected:
 
@@ -673,7 +704,7 @@ protected:
 
     template<typename Num>
     constexpr void init_integral(Num num) {
-        if constexpr(sizeof(num) <= 32) {
+        if constexpr(sizeof(num) <= 4) {
             if constexpr(std::is_unsigned_v<Num>) {
                 _un.uint32 = static_cast<std::uint32_t>(num);
                 _storage = Storage::uint32;
@@ -699,6 +730,7 @@ public:
     constexpr Key() = default;
     constexpr Key(const Value &v):_str(v) {}
     constexpr Key(std::string_view val):_str(val) {}
+    Key(const std::string &val):_str(std::string_view(val)) {}
     constexpr operator std::string_view() const {return _str.get_string();}
     operator std::string() const {return std::string(_str.get_string());}
     constexpr const char *c_str() const {return _str.get_string().data();}
@@ -708,6 +740,7 @@ public:
     constexpr std::string_view get() const {return _str.get_string();}
     constexpr auto compare(const std::string_view &other) const {return _str.get_string().compare(other);}
     constexpr auto operator<=>(const Key &other) const {return compare(other);}
+    constexpr bool operator==(const Key &other) const  = default;
 
 
 protected:
@@ -723,14 +756,25 @@ std::ostream& operator << (std::ostream& stream, const Key &key) {
 struct KeyValue {
     Key key;
     Value value;
+
+    KeyValue() = default;
+    KeyValue(std::string_view key, const Value &v):key(key),value(v) {}
+
+    constexpr bool operator==(const KeyValue &other) const {
+        return key == other.key && value == other.value;
+    }
 };
 
-inline Value object(std::initializer_list<KeyValue> items) {
-    return Value(std::span<const KeyValue>(items.begin(), items.size()));
-}
-inline Value array(std::initializer_list<Value> items) {
-    return Value(std::span<const Value>(items.begin(), items.size()));
-}
+class Array: public Value {
+public:
+    constexpr Array():Value(Type::array) {}
+    Array(std::initializer_list<Value> items):Value(std::span<const Value>(items.begin(), items.size())) {}
+};
+class Object: public Value {
+public:
+    constexpr Object():Value(Type::object) {}
+    Object(std::initializer_list<KeyValue>  items):Value(std::span<const KeyValue>(items.begin(), items.size())) {}
+};
 
 template<typename Fn>
 inline constexpr decltype(auto) json::Value::visit(Fn &&fn) const  {
@@ -751,6 +795,7 @@ inline constexpr decltype(auto) json::Value::visit(Fn &&fn) const  {
         case Storage::object: return fn(*_un.object);
         case Storage::long_number:
         case Storage::long_string:  return fn(std::string_view(_un.long_str->data(), _un.long_str->size()));
+        case Storage::number_ref:
         case Storage::string_ref: return fn(std::string_view(_un.str_ref.ptr, _un.str_ref.sz));
         case Storage::custom_type: return fn(*_un.custom);
 
@@ -762,17 +807,17 @@ inline constexpr Value::Value():_un{0},_storage{Storage::undefined} {}
 inline constexpr void Value::release(Value &v) {
     switch(v._storage) {
         case Storage::array: if (v._un.array->release_ref())
-                                    v._un.array->~Container();
+                                    delete v._un.array;
                               break;
         case Storage::object: if (v._un.object->release_ref())
-                                    v._un.object->~Container();
+                                    delete v._un.object;
                               break;
         case Storage::long_number:
         case Storage::long_string: if (v._un.long_str->release_ref())
-                                    v._un.long_str->~Container();
+                                    delete v._un.long_str;
                               break;
         case Storage::custom_type: if (v._un.custom->release_ref())
-                                    v._un.custom->~AbstractCustomValue();
+                                    delete v._un.custom;
                               break;
         default:
             break;
@@ -842,10 +887,10 @@ inline constexpr Value::Value(std::string_view str, bool is_number)
         _storage = static_cast<Storage>(static_cast<int>(
                 is_number?Storage::short_number_0:Storage::short_string_0
             ) | static_cast<unsigned char>(str.size()));
-    } else if (std::is_constant_evaluated() && !is_number) {
+    } else if (std::is_constant_evaluated()) {
         _un.str_ref.ptr = str.data();
         _un.str_ref.sz = static_cast<std::uint32_t>(str.size());
-        _storage = Storage::string_ref;
+        _storage = is_number?Storage::number_ref:Storage::string_ref;
     } else {
         _un.long_str = Container<char>::create(str.data(),str.size()).release();
         _storage = is_number?Storage::long_number:Storage::long_string;
@@ -853,7 +898,7 @@ inline constexpr Value::Value(std::string_view str, bool is_number)
 }
 
 
-inline Type Value::type() const  {
+inline constexpr Type Value::type() const  {
     switch (_storage) {
         default: return static_cast<Storage>(static_cast<int>(_storage) & 0xF0) == Storage::short_number_0?Type::number:Type::string;
         case Storage::undefined: return Type::undefined;
@@ -869,7 +914,8 @@ inline Type Value::type() const  {
         case Storage::array: return Type::array;
         case Storage::empty_object:
         case Storage::object: return Type::object;
-        case Storage::long_number: return Type::number;
+        case Storage::long_number:
+        case Storage::number_ref: return Type::number;
         case Storage::long_string:
         case Storage::string_ref: return Type::string;
         case Storage::custom_type: return _un.custom->type();
@@ -1081,26 +1127,35 @@ inline constexpr double Value::get_double() const {
     return visit([](const auto &a) ->double{
         using A = std::decay_t<decltype(a)>;
         if constexpr(std::is_arithmetic_v<A>) {return static_cast<double>(a);}
-        else if constexpr(std::is_same_v<A, std::string_view>) {return std::strtod(a.data(),nullptr);}
-        else return 0;
+        else if constexpr(std::is_same_v<A, std::string_view>) {
+            if (a.empty()) return std::numeric_limits<double>::signaling_NaN();
+             char *end = nullptr;
+            double r= std::strtod(a.data(),&end);
+            if (end != a.data()+a.size()) {
+                if (a == neg_infinity) {
+                    return -std::numeric_limits<double>::infinity();
+                } else if (a == infinity) {
+                    return std::numeric_limits<double>::infinity();
+                } else {
+                    return std::numeric_limits<double>::signaling_NaN();
+                }
+            }
+            return r;
+        }
+        else return std::numeric_limits<double>::signaling_NaN();
     });
 }
 inline constexpr float Value::get_float() const {
-    return visit([](const auto &a) ->float{
-        using A = std::decay_t<decltype(a)>;
-        if constexpr(std::is_arithmetic_v<A>) {return static_cast<float>(a);}
-        else if constexpr(std::is_same_v<A, std::string_view>) {return static_cast<float>(std::strtod(a.data(),nullptr));}
-        else return 0;
-    });
+    return static_cast<float>(get_double());
 }
 inline constexpr std::string_view Value::get_string() const {
     return visit([](const auto &a) ->std::string_view{
         using A = std::decay_t<decltype(a)>;
         if constexpr(std::is_same_v<A, std::string_view>) {return a;}
-        else if constexpr(std::is_same_v<A, bool>) {return a?"true":"false";}
+        else if constexpr(std::is_same_v<A, bool>) {return a?true_value:false_value;}
         else if constexpr(std::is_same_v<A, AbstractCustomValue>) {return a.get_string();}
-        else if constexpr(std::is_null_pointer_v<A>) {return "null";}
-        else if constexpr(std::is_same_v<A, Undefined>) {return "(undefined)";}
+        else if constexpr(std::is_null_pointer_v<A>) {return null_value;}
+        else if constexpr(std::is_same_v<A, Undefined>) {return undefined_value;}
         else return {};
     });
 }
@@ -1143,16 +1198,16 @@ std::string Value::to_string() const {
             return "{object}";
         }
         else if constexpr(std::is_same_v<A, Undefined>) {
-            return "(undefined)";
+            return std::string(undefined_value);
         }
         else if constexpr(std::is_same_v<A, AbstractCustomValue>) {
             return a.to_string();
         }
         else if constexpr(std::is_null_pointer_v<A>) {
-            return "null";
+            return std::string(null_value);
         } else {
             static_assert(std::is_same_v<A, bool>);
-            return a?"true":"false";
+            return std::string(a?true_value:false_value);
         }
     });
 }
@@ -1406,7 +1461,8 @@ inline Value Value::filter(Fn fn) {
     return Value(std::move(cont));
 
 }
-template<std::invocable<Value> Fn>
+
+template<InvokableResult<Value, Value> Fn>
 inline Value Value::map(Fn fn) {
     auto cont = Container<Value>::create(this->size());
     auto iter = cont->begin();
@@ -1417,11 +1473,33 @@ inline Value Value::map(Fn fn) {
     cont->set_size(iter);
     return Value(std::move(cont));
 }
-template<std::invocable<KeyValue> Fn>
+template<InvokableResult<Value, KeyValue> Fn>
+inline Value Value::map(Fn fn) {
+    auto cont = Container<Value>::create(this->size());
+    auto iter = cont->begin();
+    for (const auto &v: keys()) {
+        Value w (( fn(v) ));
+        if (w.defined()) *iter++ = w;
+    }
+    cont->set_size(iter);
+    return Value(std::move(cont));
+}
+template<InvokableResult<KeyValue, KeyValue> Fn>
 inline Value Value::map(Fn fn) {
     auto cont = Container<KeyValue>::create(this->size());
     auto iter = cont->begin();
     for (const auto &v: keys()) {
+        KeyValue w (( fn(v) ));
+        if (w.value.defined()) *iter++ = w;
+    }
+    return Value(std::move(cont));
+
+}
+template<InvokableResult<KeyValue, Value> Fn>
+inline Value Value::map(Fn fn) {
+    auto cont = Container<KeyValue>::create(this->size());
+    auto iter = cont->begin();
+    for (const auto &v: *this) {
         KeyValue w (( fn(v) ));
         if (w.value.defined()) *iter++ = w;
     }
@@ -1564,4 +1642,28 @@ inline json::Value::Value(Iter from, Iter to, TransformFn fn) {
 template<typename Iter>
 inline Value::Value(Iter from, Iter to)
     :Value(from, to, [&](const auto &x) -> decltype(auto){return x;}) {}
+
+
+inline constexpr bool Value::operator==(const Value &other) const {
+
+    return visit([&](const auto &a){
+        using TA = std::decay_t<decltype(a)>;
+        if constexpr(std::is_same_v<TA, Undefined>) {
+            return false;
+        } else {
+            return other.visit([&](const auto &b){
+               using TB =  std::decay_t<decltype(b)>;
+               if constexpr(std::is_same_v<TB, Undefined>) {
+                   return false;
+               } else if constexpr (std::is_same_v<TA,TB>) {
+                   return a==b;
+               } else {
+                   return false;
+               }
+            });
+        }
+    });
+}
+
+
 }

@@ -1,7 +1,8 @@
 #pragma once
 
-#include "json.h"
+#include "value.h"
 
+#include <variant>
 namespace json {
 
 template<typename T>
@@ -164,6 +165,10 @@ inline bool is_valid_json_number(Iter beg, Iter end) {
         if (beg == end) {
             return false;
         }
+    }
+
+    if (std::equal(beg,end,infinity.begin())) {
+        return true;
     }
 
     if (*beg == '0') {
@@ -369,6 +374,7 @@ OutIter decode_json_string(Iter beg, Iter end, OutIter output) {
                         }
                         codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (second_codepoint - 0xDC00);
                     }
+                    --it;
                     if (codepoint <= 0x7F) {
                         *output = static_cast<char>(codepoint);
                     } else if (codepoint <= 0x7FF) {
@@ -533,7 +539,7 @@ inline bool Parser<Fn>::finish_state(DetectType&, const Value &v) {
 }
 
 template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::finish_state(StateString &st,const Value &) {
+inline bool Parser<Fn>::finish_state(StateString &,const Value &) {
     return false;
 }
 
@@ -560,12 +566,12 @@ inline bool Parser<Fn>::finish_state(StateObject &st,const Value &v) {
 }
 
 template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::finish_state(StateCheck &st, const Value &v) {
+inline bool Parser<Fn>::finish_state(StateCheck &, const Value &) {
     return false;
 }
 
 template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::finish_state(StateNumber &st, const Value &v) {
+inline bool Parser<Fn>::finish_state(StateNumber &, const Value &) {
     return false;
 }
 

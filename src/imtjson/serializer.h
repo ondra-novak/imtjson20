@@ -1,15 +1,20 @@
 #pragma once
-#include "json.h"
+#include "value.h"
+
 #include <variant>
 #include <type_traits>
 #include <string>
 #include <map>
+#include <cmath>
 
 
 namespace json {
 
 template<typename T>
 concept NumberType = std::is_arithmetic_v<T>;
+
+template<typename T>
+concept IntegralType = std::is_integral_v<T>;
 
 class Serializer {
 public:
@@ -41,7 +46,7 @@ protected:
     using State = std::variant<Value, StateObject, StateArray>;
 
 
-    std::string _out_buff;
+    std::vector<char> _out_buff;
     std::vector<State> _stack;
     std::map<const AbstractCustomValue *, Value> _custom_values;
 
@@ -51,8 +56,9 @@ protected:
 
     void render_item(const Container<Value> &v, Type );
     void render_item(const Container<KeyValue> &v, Type );
-    template<NumberType T>
+    template<IntegralType T>
     void render_item(const T &v, Type );
+    void render_item(double v, Type );
     void render_item(bool v, Type);
     void render_item(std::string_view v, Type type);
     void render_item(std::nullptr_t, Type);
@@ -65,7 +71,7 @@ protected:
 inline std::string_view Serializer::read() {
     _out_buff.clear();
     next();
-    return _out_buff;
+    return std::string_view(_out_buff.data(),_out_buff.size());
 }
 
 inline void Serializer::next() {
@@ -157,12 +163,13 @@ inline void Serializer::render_item(const Container<KeyValue> &v, Type ) {
 }
 
 inline void Serializer::render_item(bool v, Type ) {
-    _out_buff.append(v?"true":"false");
+    auto sel = v?true_value:false_value;
+    std::copy(sel.begin(), sel.end(), std::back_inserter(_out_buff));
 }
 
 inline void Serializer::render_item(std::string_view v, Type type) {
     if (type == Type::number) {
-        _out_buff.append(v);
+        std::copy(v.begin(), v.end(), std::back_inserter(_out_buff));
     } else {
         _out_buff.push_back('"');
         encode(v, [&](char c){_out_buff.push_back(c);});
@@ -170,20 +177,59 @@ inline void Serializer::render_item(std::string_view v, Type type) {
     }
 }
 
-inline void Serializer::render_item(std::nullptr_t nullptr_t, Type ) {
-    _out_buff.append("null");
+inline void Serializer::render_item(std::nullptr_t , Type ) {
+    std::copy(null_value.begin(), null_value.end(), std::back_inserter(_out_buff));
 }
 
-inline void Serializer::render_item(Undefined undefined, Type ) {
-    _out_buff.append("\"undefined\"");
+inline void Serializer::render_item(Undefined , Type ) {
+    render_item(nullptr, Type::null);
 }
 
-template<NumberType T>
-inline void json::Serializer::render_item(const T &v, Type type) {
-    _out_buff.append(std::to_string(v));
+
+template<typename T, typename Iter>
+Iter render_unsigned_number2(T val, Iter out) {
+    if (val) {
+        unsigned int dig = static_cast<unsigned int>(val%10);
+        out = render_unsigned_number2(val/10, out);
+        *out++ = dig+'0';
+    }
+    return out;
 }
 
-inline void Serializer::render_item(const AbstractCustomValue &v, Type type) {
+
+template<typename T, typename Iter>
+Iter render_unsigned_number(T val, Iter out) {
+    if (!val) {
+        *out++ = '0';
+        return out;
+    } else {
+        char buff[sizeof(T)*3];
+        auto itr = std::rbegin(buff);
+        while (val != 0) {
+            unsigned int dig = static_cast<unsigned int>(val%10);
+            val = val / 10;
+            *itr++ = dig+'0';
+        }
+        auto chrs = std::distance(std::rbegin(buff), itr);
+        return std::copy(std::end(buff)-chrs, std::end(buff), out);
+    }
+
+}
+
+
+template<IntegralType T>
+inline void json::Serializer::render_item(const T &v, Type ) {
+    if constexpr(!std::is_unsigned_v<T>) {
+        if (v < 0) {
+            _out_buff.push_back('-');
+            render_unsigned_number(static_cast<std::make_unsigned_t<T> >(-v), std::back_inserter(_out_buff));
+            return;
+        }
+    }
+    render_unsigned_number(v, std::back_inserter(_out_buff));
+}
+
+inline void Serializer::render_item(const AbstractCustomValue &v, Type ) {
     auto iter = _custom_values.find(&v);
     if (iter == _custom_values.end()) {
         iter = _custom_values.emplace(&v, v.to_json()).first;
@@ -191,7 +237,54 @@ inline void Serializer::render_item(const AbstractCustomValue &v, Type type) {
     render_value(iter->second);
 }
 
+inline void Serializer::render_item(double v, Type ) {
+    if (std::isnan(v)) {
+        render_item(nullptr,Type::null);
+        return;
+    }
+    if (!std::isfinite(v)) {
+        _out_buff.push_back('"');
+        if (v < 0) std::copy(neg_infinity.begin(), neg_infinity.end(), std::back_inserter(_out_buff));
+        else std::copy(infinity.begin(), infinity.end(), std::back_inserter(_out_buff));
+        _out_buff.push_back('"');
+        return;
+    }
 
+    if (v < 0) {
+        _out_buff.push_back('-');
+        v = -v;
+    }
+    if (v < std::numeric_limits<double>::min()) {
+        _out_buff.push_back('0');
+        return;
+    }
+    double exp_f = std::log10(v);
+    int exponent = static_cast<int>(std::floor(exp_f));
+    if (exponent < -2 || exponent>8) {
+        v = v / std::pow(10, exponent);
+    } else {
+        exponent = 0;
+    }
+    double ip;
+    double fr = std::modf(v+std::numeric_limits<double>::epsilon(), &ip);
+    render_item(static_cast<unsigned long>(ip), Type::number);
+    if (fr > 1e-6) {
+        _out_buff.push_back('.');
+        for (int i = 0; i < 12 && fr > 1e-6; i++) {
+            fr = std::modf(fr * 10, &ip);
+            unsigned int n = static_cast<unsigned int>(ip)+'0';
+            _out_buff.push_back(static_cast<char>(n));
+        }
+    }
+    if (exponent) {
+        _out_buff.push_back('e');
+        if (exponent > 0) {
+            _out_buff.push_back('+');
+        }
+        render_item(exponent, Type::number);
+    }
+
+}
 
 template<typename Fn>
 inline void Serializer::encode(std::string_view text, Fn fn) {
