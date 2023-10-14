@@ -1,6 +1,7 @@
 #pragma once
 
 #include "value.h"
+#include "common.h"
 
 #include <variant>
 namespace json {
@@ -21,7 +22,7 @@ concept ValuePreprocessor = requires(T x, Value v) {
  */
 
 
-template<ValuePreprocessor Fn>
+template<ValuePreprocessor Fn, Format format>
 class Parser {
 public:
 
@@ -95,6 +96,16 @@ protected:
         std::string _data;
     };
 
+    struct StateDoubleNumber {
+        std::string _data;
+    };
+
+    struct StateBinNumber {
+        unsigned char size;
+        bool negative = false;
+        std::uint64_t accum = 0;
+    };
+
     //Reading array
     struct StateArray {
         std::vector<Value> _data;
@@ -113,7 +124,26 @@ protected:
         std::size_t pos = 0;
     };
 
-    using State = std::variant<DetectType, StateCheck, StateString, StateNumber, StateArray, StateObject>;
+    struct StateBinString {
+        bool is_number;
+        std::size_t sz = 0;
+        std::string data = {};
+    };
+
+    struct StateBinArray {
+        std::size_t sz = 0;
+        std::vector<Value> data;
+    };
+    struct StateBinObject {
+        bool _reading_key = false;
+        Key key;
+        std::vector<KeyValue> data;
+        std::size_t sz = 0;
+    };
+
+    using StateText = std::variant<DetectType, StateCheck, StateString, StateNumber, StateArray, StateObject>;
+    using StateBin =  std::variant<DetectType, StateDoubleNumber, StateBinNumber, StateBinString, StateBinArray, StateBinObject>;
+    using State = std::conditional_t<format == Format::text, StateText, StateBin>;
 
     Fn _preproc;
     std::vector<State> _state;
@@ -132,12 +162,22 @@ protected:
     bool parse_state(StateObject &st);
     bool parse_state(StateCheck &st);
     bool parse_state(StateNumber &st);
+    bool parse_state(StateDoubleNumber &st);
+    bool parse_state(StateBinNumber &st);
+    bool parse_state(StateBinString &st);
+    bool parse_state(StateBinArray &st);
+    bool parse_state(StateBinObject &st);
     bool finish_state(DetectType &, const Value &v);
     bool finish_state(StateString &st, const Value &v);
     bool finish_state(StateArray &st, const Value &v);
     bool finish_state(StateObject &st, const Value &v);
     bool finish_state(StateCheck &st, const Value &v);
     bool finish_state(StateNumber &st, const Value &v);
+    bool finish_state(StateDoubleNumber &st, const Value &v);
+    bool finish_state(StateBinNumber &st, const Value &v);
+    bool finish_state(StateBinString &st, const Value &v);
+    bool finish_state(StateBinArray &st, const Value &v);
+    bool finish_state(StateBinObject &st, const Value &v);
 
 
 };
@@ -148,9 +188,11 @@ struct ParserEmptyPreprocesor {
 
 
 template<ValuePreprocessor Fn>
-Parser(Fn) -> Parser<Fn>;
+Parser(Fn) -> Parser<Fn, Format::text>;
 
-Parser() -> Parser<ParserEmptyPreprocesor>;
+Parser() -> Parser<ParserEmptyPreprocesor, Format::text>;
+
+using BinaryParser = Parser<ParserEmptyPreprocesor, Format::binary>;
 
 
 template<typename Iter>
@@ -213,20 +255,20 @@ inline bool is_valid_json_number(Iter beg, Iter end) {
 
 
 
-template<ValuePreprocessor Fn>
-inline constexpr Parser<Fn>::Parser():_state{DetectType()} {
+template<ValuePreprocessor Fn, Format format>
+inline constexpr Parser<Fn, format>::Parser():_state{DetectType()} {
 }
 
-template<ValuePreprocessor Fn>
-inline constexpr Parser<Fn>::Parser(Fn preprocFn)
+template<ValuePreprocessor Fn, Format format>
+inline constexpr Parser<Fn, format>::Parser(Fn preprocFn)
     :_preproc(std::move(preprocFn))
     ,_state{DetectType()}
 {
 }
 
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::write(std::string_view text) {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::write(std::string_view text) {
     _pos = text.begin();
     _end = text.end();
     while (_pos != _end)  {
@@ -236,23 +278,23 @@ inline bool Parser<Fn>::write(std::string_view text) {
 }
 
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::is_error() const {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::is_error() const {
     return _is_error;
 }
 
-template<ValuePreprocessor Fn>
-inline Value Parser<Fn>::get_result() {
+template<ValuePreprocessor Fn, Format format>
+inline Value Parser<Fn, format>::get_result() {
     return _is_error?Value():_result;
 }
 
-template<ValuePreprocessor Fn>
-inline std::string_view Parser<Fn>::get_unprocessed_data() const {
+template<ValuePreprocessor Fn, Format format>
+inline std::string_view Parser<Fn, format>::get_unprocessed_data() const {
     return std::string_view(_pos, std::distance(_pos, _end));
 }
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::do_parse_cycle() {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::do_parse_cycle() {
     if (_state.empty()) return false;
     bool need_more = std::visit([&](auto &st){
         return parse_state(st);
@@ -269,47 +311,93 @@ inline bool Parser<Fn>::do_parse_cycle() {
 }
 
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::parse_state(DetectType&) {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::parse_state(DetectType&) {
     if (_pos == _end) return true;
-    while (std::isspace(*_pos)) {
-        ++_pos;
-        if (_pos == _end) return true;
-    }
-    switch (*_pos) {
-        case '[': _state.push_back(StateArray{});
-                  ++_pos;
-                  break;
-        case '{': _state.push_back(StateObject{});
-                  ++_pos;
-                  break;
-        case '"': _state.push_back(StateString{});
-                  ++_pos;
-                  break;
-        case 't': _state.push_back(StateCheck{"true",true});
-                  break;
-        case 'f': _state.push_back(StateCheck{"false",false});
-                  break;
-        case 'n': _state.push_back(StateCheck{"null",nullptr});
-                  break;
-        case '0':
-        case '1':
-        case '2':
-        case '3':
-        case '4':
-        case '5':
-        case '6':
-        case '7':
-        case '8':
-        case '9':
-        case '-':
-        case '+': _state.push_back(StateNumber{});
-                  break;
-        default:
+    if constexpr(format == Format::text) {
+        while (std::isspace(*_pos)) {
+            ++_pos;
+            if (_pos == _end) return true;
+        }
+        switch (*_pos) {
+            case '[': _state.push_back(StateArray{});
+                      ++_pos;
+                      break;
+            case '{': _state.push_back(StateObject{});
+                      ++_pos;
+                      break;
+            case '"': _state.push_back(StateString{});
+                      ++_pos;
+                      break;
+            case 't': _state.push_back(StateCheck{"true",true});
+                      break;
+            case 'f': _state.push_back(StateCheck{"false",false});
+                      break;
+            case 'n': _state.push_back(StateCheck{"null",nullptr});
+                      break;
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+            case '-':
+            case '+': _state.push_back(StateNumber{});
+                      break;
+            default:
+                    _is_error = true;
+                    return false;
+        }
+        return true;
+    } else {
+        unsigned char type = *_pos++;
+        unsigned char maj = type & BinaryType::mask;
+        unsigned char sz = (type & BinaryType::size_mask) + 1;
+        switch (maj) {
+            case BinaryType::simple: {
+                switch(type) {
+                    case BinaryType::null: _result = _preproc(nullptr);return false;
+                    case BinaryType::bool_true: _result = _preproc(true);return false;
+                    case BinaryType::bool_false: _result = _preproc(false);return false;
+                    case BinaryType::double_number:
+                        _state.push_back(StateDoubleNumber());
+                        break;
+                    default: _result = _preproc(Value());return false;
+                }
+                break;
+            }
+            case BinaryType::p_number:
+                _state.push_back(StateBinNumber{sz, false});
+                break;
+            case BinaryType::n_number:
+                _state.push_back(StateBinNumber{sz, true});
+                break;
+            case BinaryType::string:
+                _state.push_back(StateBinString{false});
+                _state.push_back(StateBinNumber{sz, false});
+                break;
+            case BinaryType::string_number:
+                _state.push_back(StateBinString{true});
+                _state.push_back(StateBinNumber{sz, false});
+                break;
+            case BinaryType::array:
+                 _state.push_back(StateBinArray());
+                 _state.push_back(StateBinNumber{sz, false});
+                break;
+            case BinaryType::object:
+                _state.push_back(StateBinObject());
+                _state.push_back(StateBinNumber{sz, false});
+                break;
+            default:
                 _is_error = true;
                 return false;
+        }
+        return true;
     }
-    return true;
 
 }
 
@@ -404,8 +492,8 @@ OutIter decode_json_string(Iter beg, Iter end, OutIter output) {
 }
 
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::parse_state(StateString &st) {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::parse_state(StateString &st) {
     while (_pos != _end) {
         if (!st._escape) {
             if (*_pos == '"') {
@@ -426,8 +514,8 @@ inline bool Parser<Fn>::parse_state(StateString &st) {
     return true;
 }
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::parse_state(StateArray &st) {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::parse_state(StateArray &st) {
     while (_pos != _end) {
         if (!std::isspace(*_pos)) {
             char c = *_pos;
@@ -455,8 +543,8 @@ inline bool Parser<Fn>::parse_state(StateArray &st) {
     return true;
 }
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::parse_state(StateObject &st) {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::parse_state(StateObject &st) {
     while (_pos != _end) {
         if (!std::isspace(*_pos)) {
             char c = *_pos;
@@ -497,8 +585,8 @@ inline bool Parser<Fn>::parse_state(StateObject &st) {
     return true;
 }
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::parse_state(StateCheck &st) {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::parse_state(StateCheck &st) {
     while (_pos != _end) {
         if (st.what[st.pos] == *_pos) {
             ++st.pos;
@@ -515,8 +603,8 @@ inline bool Parser<Fn>::parse_state(StateCheck &st) {
     return true;
 }
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::parse_state(StateNumber &st) {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::parse_state(StateNumber &st) {
     while (_pos != _end) {
         char c = *_pos;
         if (std::isdigit(c) || c=='+' || c=='-' || c == 'e' || c == 'E' || c == '.') {
@@ -532,25 +620,25 @@ inline bool Parser<Fn>::parse_state(StateNumber &st) {
     return true;
 }
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::finish_state(DetectType&, const Value &v) {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::finish_state(DetectType&, const Value &v) {
     _result = _preproc(v);
     return false;
 }
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::finish_state(StateString &,const Value &) {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::finish_state(StateString &,const Value &) {
     return false;
 }
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::finish_state(StateArray &st, const Value &v) {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::finish_state(StateArray &st, const Value &v) {
     st._data.push_back(v);
     return true;
 }
 
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::finish_state(StateObject &st,const Value &v) {
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::finish_state(StateObject &st,const Value &v) {
     if (st._reading_key) {
         if (v.type() != Type::string) {
             _is_error = true;
@@ -563,16 +651,6 @@ inline bool Parser<Fn>::finish_state(StateObject &st,const Value &v) {
         st._reading_key = true;
     }
     return true;
-}
-
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::finish_state(StateCheck &, const Value &) {
-    return false;
-}
-
-template<ValuePreprocessor Fn>
-inline bool Parser<Fn>::finish_state(StateNumber &, const Value &) {
-    return false;
 }
 
 class ParseError: public std::exception {
@@ -590,7 +668,152 @@ protected:
 
 };
 
-inline json::Value parse(std::string_view text) {
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::finish_state(StateCheck &, const Value &) {
+    return false;
+}
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::parse_state(StateDoubleNumber &st) {
+    while (_pos != _end) {
+        st._data.push_back(*_pos++);
+        if (st._data.size() >= 8) {
+            double v;
+            std::copy(st._data.begin(), st._data.end(), reinterpret_cast<char *>(&v));
+            _result = v;
+            return false;
+        }
+    }
+    return true;;
+}
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::parse_state(StateBinNumber &st) {
+    while (_pos != _end && st.size) {
+        st.accum = st.accum << 8 | static_cast<unsigned char>(*_pos++);
+        --st.size;
+    }
+    if (st.size) return true;
+    if (st.negative) {
+        _result = -static_cast<std::int64_t>(st.accum);
+    } else {
+        _result = static_cast<std::uint64_t>(st.accum);
+    }
+    return false;
+}
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::parse_state(StateBinString &st) {
+    while (_pos != _end) {
+        st.data.push_back(*_pos++);
+        if (st.data.size() >= st.sz) {
+            _result = Value(st.data, st.is_number);
+            return false;
+        }
+    }
+    return true;
+}
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::parse_state(StateBinArray &st) {
+    _result = Value(st.data);
+    return false;
+
+}
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::parse_state(StateBinObject &st) {
+    _result = Value(st.data);
+    return false;
+}
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::finish_state(StateNumber &, const Value &) {
+    return false;
+}
+
+
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::finish_state(StateDoubleNumber &, const Value &) {
+    return false;
+}
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::finish_state(StateBinNumber &,const Value &) {
+    return false;
+}
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::finish_state(StateBinString &st, const Value &v) {
+    st.sz = v.get();
+    if (st.sz == 0) {
+        _result = "";
+        return false;
+    }
+    st.data.reserve(st.sz);
+    return true;
+}
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::finish_state(StateBinArray &st, const Value &v) {
+    if (st.sz == 0) {
+        st.sz = v.get();
+        if (st.sz == 0) {
+            _result = Type::array;
+            return false;
+        }
+        st.data.reserve(st.sz);
+        _state.push_back(DetectType());
+        return true;
+    } else {
+        st.data.push_back(v);
+        if (st.data.size() < st.sz) {
+            _state.push_back(DetectType());
+            return true;
+        } else {
+            _result = std::move(st.data);
+            return false;
+        }
+    }
+}
+
+template<ValuePreprocessor Fn, Format format>
+inline bool Parser<Fn, format>::finish_state(StateBinObject &st, const Value &v) {
+    if (st.sz == 0) {
+        st.sz = v.get();
+        if (st.sz == 0) {
+            _result = Type::object;
+            return false;
+        }
+        st.data.reserve(st.sz);
+        st._reading_key = true;
+        _state.push_back(DetectType());
+        return true;
+    } else if (st._reading_key){
+        if (v.type() != Type::string) {
+            _is_error = true;
+            return false;
+        }
+        st.key = v;
+        st._reading_key = false;
+        _state.push_back(DetectType());
+        return true;
+    } else {
+        st.data.push_back(KeyValue{st.key,v});
+        if (st.data.size() < st.sz) {
+            st._reading_key = true;
+            _state.push_back(DetectType());
+            return true;
+        } else {
+            _result = std::move(st.data);
+            return false;
+        }
+    }
+}
+
+inline Value parse(std::string_view text) {
     Parser p;
     if (!p.write(text)) {
         if (p.is_error()) {
@@ -605,5 +828,23 @@ inline json::Value parse(std::string_view text) {
 
 }
 
+
+inline Value unbinarize(std::string_view bin) {
+    BinaryParser p;
+    if (!p.write(bin)) {
+        if (p.is_error()) {
+            auto unproc = p.get_unprocessed_data();
+            auto at = bin.size() - unproc.size();
+            throw ParseError(at);
+        }
+        return p.get_result();
+    } else {
+        throw ParseError(bin.size());
+    }
+
 }
+
+
+}
+
 

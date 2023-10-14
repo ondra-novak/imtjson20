@@ -188,6 +188,28 @@ json::Value v = json::parse(text);
 ```
 Note that this function may generate a `ParseError` exception
 
+### Binary format
+
+The binary format is a proprietary format supported only by this library, is not standardized, and is intended for communication between programs using this library. 
+
+To create serialize into binary format, use
+
+```
+std::string s = json::binarize(value);
+```
+
+To parse binary format
+
+```
+json::Value value = json::unbinarize(s);
+```
+
+There are also classes that can handle binary serializing / parsing
+
+```
+json::BinaryParser bp;
+json::BinarySerializer bp;
+```
 
 ### Numbers as text
 

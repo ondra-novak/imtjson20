@@ -1,6 +1,8 @@
 #include <imtjson/value.h>
 #include <imtjson/serializer.h>
+#include <imtjson/parser.h>
 #include "check.h"
+#include <iomanip>
 
 
 int main() {
@@ -9,6 +11,7 @@ int main() {
 
 
     Value data = {
+            {"aaa",{1,2,3}},
             {"m1",42},
             {"abcdefgewwqeq",{
                     1,12.3,43.212,1.2342312e10,0.0,std::numeric_limits<double>::min()
@@ -26,8 +29,20 @@ int main() {
             {"nan", std::numeric_limits<double>::signaling_NaN()},
     };
 
-    std::string s = stringify(data);
-    CHECK_EQUAL(s, R"JSON({"abcdefgewwqeq":[1,12.3,43.212,1.2342312e+10,0,2.225073858507e-308],"bool1":true,"bool2":false,"inf1":"∞","inf2":"-∞","m1":42,"missing":null,"nan":null,"subobject":{"abc":-123,"num":123.321000000000001}})JSON");
+    std::string s = binarize(data);
+   /* for (unsigned char a: s) {
+        std::cout << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(a) << " ";
+    }*/
+
+    Value res = unbinarize(s);
+    CHECK_EQUAL(stringify(res),stringify(data));
+    CHECK_EQUAL(s,binarize(res));
+
+
+
 
 
 }
+
+template class json::Parser<json::ParserEmptyPreprocesor, json::Format::text>;
+template class json::Parser<json::ParserEmptyPreprocesor, json::Format::binary>;

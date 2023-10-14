@@ -10,6 +10,7 @@
 #include <vector>
 #include <algorithm>
 
+
 namespace json {
 
 enum class Type : char {
@@ -252,7 +253,10 @@ struct DirectStorage: StorageBase {
     T _val;
 };
 
-class Undefined {};
+class Undefined {
+public:
+    bool operator==(const Undefined &) const {return true;}
+};
 class IsNumber {};
 class Value;
 
@@ -320,11 +324,12 @@ public:
      */
     virtual const Value &operator[](const std::string_view &key) const;
 
+    ///Optional, retrieve begin of list of keys
+    virtual const KeyValue *keys_begin() const {return nullptr;}
 
-    ///Optional, compare two custom values
-    virtual bool operator==(const AbstractCustomValue &other) const {
-        return this == &other;
-    }
+    ///Optional, retrieve end of list of keys
+    virtual const KeyValue *keys_end() const  {return nullptr;}
+
 
 
 };
@@ -749,7 +754,7 @@ protected:
 
 #pragma pack(pop)
 
-std::ostream& operator << (std::ostream& stream, const Key &key) {
+inline std::ostream& operator << (std::ostream& stream, const Key &key) {
     return stream << key.get_string();
 }
 
@@ -1160,7 +1165,7 @@ inline constexpr std::string_view Value::get_string() const {
     });
 }
 
-constexpr bool Value::empty() const {
+inline constexpr bool Value::empty() const {
     return visit([](const auto &a) ->bool{
         using A = std::decay_t<decltype(a)>;
         if constexpr(std::is_same_v<A, Container<Value> >
@@ -1172,7 +1177,7 @@ constexpr bool Value::empty() const {
         }
     });
 }
-constexpr std::size_t Value::size() const {
+inline constexpr std::size_t Value::size() const {
     return visit([](const auto &a) -> std::size_t{
         using A = std::decay_t<decltype(a)>;
         if constexpr(std::is_same_v<A, Container<Value> >
@@ -1310,6 +1315,12 @@ public:
     constexpr KeyValue operator[](unsigned int index) const {
         if (_owner._storage == Storage::object && _owner._un.object->size() > index) {
             return _owner._un.object->data()[index];
+        } else if (_owner._storage == Storage::custom_type) {
+            auto b = begin();
+            auto e = end();
+            if (index >= std::distance(b, e)) return {};
+            std::advance(b,index);
+            return *b;
         } else {
             return {};
         };
@@ -1317,6 +1328,8 @@ public:
     const KeyValue *begin() const {
         if (_owner._storage == Storage::object) {
             return _owner._un.object->begin();
+        } else if (_owner._storage == Storage::custom_type) {
+            return _owner._un.custom->keys_begin();
         } else {
             return {};
         }
@@ -1324,6 +1337,8 @@ public:
     const KeyValue *end() const {
         if (_owner._storage == Storage::object) {
             return _owner._un.object->end();
+        } else if (_owner._storage == Storage::custom_type) {
+            return _owner._un.custom->keys_end();
         } else {
             return {};
         }
@@ -1331,6 +1346,8 @@ public:
     std::size_t size() const {
         if (_owner._storage == Storage::object) {
             return _owner._un.object->size();
+        } else if (_owner._storage == Storage::custom_type) {
+            return std::distance(begin(), end());
         } else {
             return 0;
         }
@@ -1646,24 +1663,47 @@ inline Value::Value(Iter from, Iter to)
 
 inline constexpr bool Value::operator==(const Value &other) const {
 
-    return visit([&](const auto &a){
-        using TA = std::decay_t<decltype(a)>;
-        if constexpr(std::is_same_v<TA, Undefined>) {
-            return false;
-        } else {
-            return other.visit([&](const auto &b){
-               using TB =  std::decay_t<decltype(b)>;
-               if constexpr(std::is_same_v<TB, Undefined>) {
-                   return false;
-               } else if constexpr (std::is_same_v<TA,TB>) {
-                   return a==b;
-               } else {
-                   return false;
-               }
+    auto t = type();
+    if (t != other.type()) {
+        return false;
+    }
+    switch(t) {
+        case Type::null:
+        case Type::undefined: return true;
+        case Type::boolean: return get_bool() == other.get_bool();
+        case Type::object: {
+            if (size() != other.size()) return false;
+            for (unsigned int i = 0; i < size(); ++i) {
+                if (keys()[i] != other.keys()[i]) return false;
+            }
+            return true;
+        }
+        case Type::array: {
+            if (size() != other.size()) return false;
+            for (unsigned int i = 0; i < size(); ++i) {
+                if ((*this)[i] != other[i]) return false;
+            }
+            return true;
+        }case Type::number: {
+            return visit([&](const auto &a){
+                return other.visit([&](const auto &b){
+                    using TA = std::decay_t<decltype(a)>;
+                    using TB = std::decay_t<decltype(b)>;
+                    if constexpr (std::is_integral_v<TA> && std::is_integral_v<TB>) {
+                        using Common = std::common_type_t<TA,TB>;
+                        return static_cast<Common>(a) == static_cast<Common>(b);
+                    } else {
+                        return get_double() == other.get_double();
+                    }
+                });
             });
         }
-    });
+        case Type::string: return get_string() == other.get_string();
+        default: false;
+    }
+
 }
 
+constexpr Value null = nullptr;
 
 }
