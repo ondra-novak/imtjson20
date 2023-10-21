@@ -97,12 +97,15 @@ public:
     constexpr T *end() {return  const_cast<T *>(this->_ptr)+this->_sz;}
     ///change size of the string (you are allowed only to shrink the size
     constexpr void set_size(const T *new_end) {
-        auto newsz = new_end - begin();
-        this->_sz = newsz;
+        std::size_t newsz = new_end - begin();
+        if (newsz < this->_sz) {
+            for (auto x = newsz; x < this->_sz; ++x) std::destroy_at(_ptr+x);
+            this->_sz = newsz;
+        }
     }
 
     virtual constexpr ~Container() {
-        for (T &x:*this) x.~T();
+        for (T &x:*this) std::destroy_at(&x);
     }
 
     Container(const Container &) = delete;
@@ -130,12 +133,46 @@ public:
         out->add_ref();
         return PContainer<T>(out);
     }
+
     static PContainer<T> create(std::size_t sz) {
         AllocInfo info = {sz};
         auto out = new(info) Container<T>(info);
         out->add_ref();
         return PContainer<T>(out);
     }
+
+    class Builder: public PContainer<T> {
+    public:
+        using value_type = T;
+
+        Builder(PContainer<T> ptr, T *beg, T *end)
+            :PContainer<T>(std::move(ptr))
+            ,_beg(beg)
+            ,_end(end) {}
+
+        template<std::convertible_to<T> X>
+        void push_back(X && item) {
+            if (_beg != _end) {
+                std::construct_at(_beg, std::forward<X>(item));
+                ++_beg;
+                (*this)->_sz = _beg - (*this)->_ptr;
+            }
+        }
+
+    protected:
+        T *_beg;
+        T *_end;
+    };
+
+    static Builder create_builder(std::size_t sz) {
+        AllocInfo info = {sz};
+        T *beg;
+        T *end;
+        auto out = new(info) Container<T>(info, beg, end);
+        out->add_ref();
+        return Builder(PContainer<T>(out), beg, end);
+    }
+
 protected:
     const T *_ptr;
     std::size_t _sz;
@@ -162,6 +199,10 @@ protected:
             std::construct_at(&target, std::move(*source));
             ++source;
         }
+    }
+    Container(AllocInfo &info, T *& beg, T *& end):_ptr(info.buffer), _sz(0) {
+        beg = info.buffer;
+        end = info.buffer+info.sz;
     }
 
 
@@ -266,6 +307,8 @@ constexpr std::string_view true_value="true";
 constexpr std::string_view false_value="false";
 constexpr std::string_view null_value="null";
 constexpr std::string_view undefined_value="(undefined)";
+constexpr std::string_view undef_key_name = "\x7F";
+
 
 ///Interface to create custom values
 /**
@@ -705,8 +748,6 @@ protected:
     template<typename X>
     void init_object_move(X &&x);
 
-    static PContainer<KeyValue> sort_object(PContainer<KeyValue> ptr);
-
     template<typename Num>
     constexpr void init_integral(Num num) {
         if constexpr(sizeof(num) <= 4) {
@@ -738,6 +779,7 @@ public:
     Key(const std::string &val):_str(std::string_view(val)) {}
     constexpr operator std::string_view() const {return _str.get_string();}
     operator std::string() const {return std::string(_str.get_string());}
+    const Value &to_value() const {return _str;}
     constexpr const char *c_str() const {return _str.get_string().data();}
     constexpr std::size_t size() const {return _str.get_string().size();}
     constexpr bool empty() const {return _str.get_string().empty();}
@@ -764,6 +806,7 @@ struct KeyValue {
 
     KeyValue() = default;
     KeyValue(std::string_view key, const Value &v):key(key),value(v) {}
+    KeyValue(const Value &key, const Value &v):key(key),value(v) {}
 
     constexpr bool operator==(const KeyValue &other) const {
         return key == other.key && value == other.value;
@@ -947,6 +990,25 @@ inline void Value::init_array_move(X &&arr) {
     }
 }
 
+inline bool sort_object(Container<KeyValue> &cont) {
+    if (cont.size() < 2) return false;
+    std::sort(cont.begin(), cont.end(),[&](const KeyValue &a, const KeyValue &b) {
+        return a.key.get_string() < b.key.get_string();
+    });
+    auto iter = cont.begin();
+    auto prev = iter;
+    ++iter;
+    iter = std::remove_if(iter, cont.end(), [&](const KeyValue &x) {
+       if (prev->key == x.key) return true;
+       ++prev;
+       return false;
+    });
+    cont.set_size(iter);
+    return iter != cont.end();
+}
+
+
+
 inline Value::Value(const std::vector<Value> &arr) {init_array(arr);}
 inline Value::Value(std::vector<Value> &&arr) {init_array_move(std::move(arr));}
 template<size_t _Extent>
@@ -959,8 +1021,10 @@ inline void Value::init_object(const X &obj) {
     if (obj.empty()) {
         _storage = Storage::empty_object;
     } else {
-        _un.object= sort_object(Container<KeyValue>::create(obj.data(), obj.size())).release();
         _storage = Storage::object;
+        auto cont = Container<KeyValue>::create(obj.data(), obj.size()).release();;
+        _un.object = cont;
+        sort_object(*cont);
     }
 
 }
@@ -969,8 +1033,10 @@ inline void Value::init_object_move(X &&obj) {
     if (obj.empty()) {
         _storage = Storage::empty_object;
     } else {
-        _un.object = sort_object(Container<KeyValue>::create_move_in(obj.data(), obj.size())).release();
         _storage = Storage::object;
+        auto cont = Container<KeyValue>::create_move_in(obj.data(), obj.size()).release();
+        _un.object = cont;
+       sort_object(*cont);
     }
 }
 
@@ -980,13 +1046,6 @@ inline Value::Value(PCustomValue custom)
 
 }
 
-
-inline PContainer<KeyValue> Value::sort_object(PContainer<KeyValue> ptr) {
-    std::sort(ptr->begin(),ptr->end(),[&](const KeyValue &a, const KeyValue &b) {
-        return a.key.get_string() < b.key.get_string();
-    });
-    return ptr;
-}
 
 
 inline Value::Value(const std::vector<KeyValue> &arr) {init_object(arr);}
@@ -1244,15 +1303,16 @@ inline Value::Value(std::initializer_list<Value> list) {
         return v.type() == Type::array && v.size() == 2 && v[0].type() == Type::string;
     });
     if (is_object) {
-        auto cont = Container<KeyValue>::create(list.size());
-        std::transform(list.begin(), list.end(), cont->begin(), [&](const Value &v){
+        auto cont = Container<KeyValue>::create_builder(list.size());
+        std::transform(list.begin(), list.end(), std::back_inserter(cont), [&](const Value &v){
             return KeyValue{v[0].get_string(),v[1]};
         });
-        _un.object = sort_object(std::move(cont)).release();
+        sort_object(*cont);
+        _un.object = cont.release();
         _storage = Storage::object;
     } else {
-        auto cont = Container<Value>::create(list.size());
-        std::copy(list.begin(), list.end(), cont->begin());
+        auto cont = Container<Value>::create_builder(list.size());
+        std::copy(list.begin(), list.end(), std::back_inserter(cont));
         _un.array = cont.release();
         _storage = Storage::array;
     }
@@ -1370,8 +1430,8 @@ inline constexpr Value::KeyAccess Value::keys() const {
 }
 
 inline Value &Value::merge_keys(const Value &changes) {
-    PContainer<KeyValue> kv = Container<KeyValue>::create(size()+changes.size());
-    auto out = kv->begin();
+    auto kv = Container<KeyValue>::create_builder(size()+changes.size());
+    auto out = std::back_inserter(kv);
     auto kv1 = keys();
     auto kv2 = changes.keys();
     auto iter1 = kv1.begin();
@@ -1409,18 +1469,17 @@ inline Value &Value::merge_keys(const Value &changes) {
         }
         ++iter2;
     }
-    kv->set_size(out);
     (*this) = Value(std::move(kv));
     return *this;
 }
 
 inline Value &Value::set_keys(std::initializer_list<std::pair<std::string_view, Value> > items) {
-    PContainer<KeyValue> kv = Container<KeyValue>::create(items.size());
-    std::transform(items.begin(), items.end(), kv->begin(), [](const auto &kv){
+    auto kv = Container<KeyValue>::create_builder(items.size());
+    std::transform(items.begin(), items.end(), std::back_inserter(kv), [](const auto &kv){
         return KeyValue{kv.first, kv.second};
     });
-    Value tmp(sort_object(std::move(kv)));
-    return merge_keys(tmp);
+    sort_object(*kv);
+    return merge_keys(Value(std::move(kv)));
 }
 
 inline constexpr bool Value::get(bool defval) const {if (type() == Type::boolean) return get_bool(); else return defval;}
@@ -1460,20 +1519,17 @@ inline Value::GetHelper Value::get() const {return GetHelper(*this);}
 
 template<std::invocable<Value> Fn>
 inline Value Value::filter(Fn fn) {
-    auto cont = Container<Value>::create(this->size());
-    auto iter = cont->begin();
+    auto cont = Container<Value>::create_builder(this->size());
     for (const auto &v: *this) {
-        if (fn(v)) *iter++ = v;
+        if (fn(v)) cont.push_back(v);
     }
-    cont->set_size(iter);
     return Value(std::move(cont));
 }
 template<std::invocable<KeyValue> Fn>
 inline Value Value::filter(Fn fn) {
-    auto cont = Container<KeyValue>::create(this->size());
-    auto iter = cont->begin();
+    auto cont = Container<KeyValue>::create_builder(this->size());
     for (const auto &v: keys()) {
-        if (fn(v)) *iter++ = v;
+        if (fn(v)) cont.push_back(v);
     }
     return Value(std::move(cont));
 
@@ -1481,44 +1537,38 @@ inline Value Value::filter(Fn fn) {
 
 template<InvokableResult<Value, Value> Fn>
 inline Value Value::map(Fn fn) {
-    auto cont = Container<Value>::create(this->size());
-    auto iter = cont->begin();
+    auto cont = Container<Value>::create_builder(this->size());
     for (const auto &v: *this) {
         Value w (( fn(v) ));
-        if (w.defined()) *iter++ = w;
+        if (w.defined()) cont.push_back(w);
     }
-    cont->set_size(iter);
     return Value(std::move(cont));
 }
 template<InvokableResult<Value, KeyValue> Fn>
 inline Value Value::map(Fn fn) {
-    auto cont = Container<Value>::create(this->size());
-    auto iter = cont->begin();
+    auto cont = Container<Value>::create_builder(this->size());
     for (const auto &v: keys()) {
         Value w (( fn(v) ));
-        if (w.defined()) *iter++ = w;
+        if (w.defined()) cont.push_back(w);
     }
-    cont->set_size(iter);
     return Value(std::move(cont));
 }
 template<InvokableResult<KeyValue, KeyValue> Fn>
 inline Value Value::map(Fn fn) {
-    auto cont = Container<KeyValue>::create(this->size());
-    auto iter = cont->begin();
+    auto cont = Container<KeyValue>::create_builder(this->size());
     for (const auto &v: keys()) {
         KeyValue w (( fn(v) ));
-        if (w.value.defined()) *iter++ = w;
+        if (w.value.defined()) cont.push_back(w);
     }
     return Value(std::move(cont));
 
 }
 template<InvokableResult<KeyValue, Value> Fn>
 inline Value Value::map(Fn fn) {
-    auto cont = Container<KeyValue>::create(this->size());
-    auto iter = cont->begin();
+    auto cont = Container<KeyValue>::create_builder(this->size());
     for (const auto &v: *this) {
         KeyValue w (( fn(v) ));
-        if (w.value.defined()) *iter++ = w;
+        if (w.value.defined()) cont.push_back(w);
     }
     return Value(std::move(cont));
 
@@ -1573,10 +1623,9 @@ inline Value& Value::append(Value array) {
     const auto &arr1 = get_array();
     const auto &arr2 = array.get_array();
     auto finsz = arr1.size() + arr2.size();
-    auto res = Container<Value>::create(finsz);
-    auto iter = std::copy(arr1.begin(), arr1.end(), res->begin());
+    auto res = Container<Value>::create_builder(finsz);
+    auto iter = std::copy(arr1.begin(), arr1.end(), std::back_inserter(res));
     iter = std::copy(arr2.begin(), arr2.end(), iter);
-    res->set_size(iter);
     (*this) = Value(std::move(res));
     return *this;
 }
@@ -1584,10 +1633,9 @@ inline Value& Value::append(Value array) {
 inline Value& Value::append(std::initializer_list<Value> data) {
     const auto &arr1 = get_array();
     auto finsz = arr1.size() + data.size();
-    auto res = Container<Value>::create(finsz);
-    auto iter = std::copy(arr1.begin(), arr1.end(), res->begin());
+    auto res = Container<Value>::create_builder(finsz);
+    auto iter = std::copy(arr1.begin(), arr1.end(), std::back_inserter(res));
     iter = std::copy(data.begin(), data.end(), iter);
-    res->set_size(iter);
     (*this) = Value(std::move(res));
     return *this;
 }
@@ -1608,25 +1656,22 @@ inline Value json::Value::splice(Iterator from, Iterator to, Iter new_from, Iter
     auto ersz = std::distance(from, to);
     auto addsz = std::distance(new_from, new_to);
     auto finsz = size() - ersz + addsz;
-    auto res = Container<Value>::create(finsz);
+    auto res = Container<Value>::create_builder(finsz);
     const auto &src = get_array();
     Value erased = slice(from, to);
-    auto p = res->begin();
-    auto pe = res->end();
     auto rd = src.begin();
     auto re = src.end();
-    while (rd != from && p != pe) {
-        *p++ = *rd++;
+    while (rd != from) {
+        res.push_back(*rd++);
     }
-    while (new_from != new_to && p != pe) {
-        *p++ = *new_from++;
+    while (new_from != new_to) {
+        res.push_back(*new_from);
     }
     rd += ersz;
-    while (rd != re && p != pe) {
-        *p++ = *rd++;
+    while (rd != re) {
+        res.push_back(*rd++);
     }
-    res->set_size(p);
-    (*this) = Value(std::move(p));
+    (*this) = Value(std::move(res));
     return erased;
 }
 
@@ -1650,8 +1695,8 @@ inline json::Value::Value(Iter from, Iter to, TransformFn fn) {
         (*this) = Value(sort_object(obj));
     } else {
         static_assert(std::is_constructible_v<Value, T>, "Cannot construct Value from the item (array)");
-        auto arr = Container<Value>::create(std::distance(from,to));
-        std::transform(from, to, arr->begin(), std::forward<TransformFn>(fn));
+        auto arr = Container<Value>::create_builder(std::distance(from,to));
+        std::transform(from, to, std::back_inserter(arr), std::forward<TransformFn>(fn));
         (*this) = Value(std::move(arr));
     }
 }

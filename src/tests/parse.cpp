@@ -46,6 +46,14 @@ constexpr std::string_view case5 = R"json({
   "emoji_string": "Toto je řetězec s několika smajlíky: \ud83d\ude00 \ud83d\ude04 \ud83d\ude0a"
 })json";
 
+constexpr std::string_view case6 = R"json({
+  "":["string","number","object"], 
+  "boolean": false,
+  "null_value": null,
+  "":""
+})json";
+
+
 int main() {
 
     using namespace json;
@@ -54,6 +62,7 @@ int main() {
     Value jc3 = parse(case3);
     Value jc4 = parse(case4);
     Value jc5 = parse(case5);
+    Value jc6 = parse(case6);
 
     CHECK_EQUAL(jc1["string"].get_string(), "Hello,\n World!");
     CHECK_EQUAL(jc1["number"].get_int(), 42);
@@ -81,6 +90,17 @@ int main() {
     CHECK_EQUAL(jc4["person"]["address"]["street"].get_string(), "123 Main Street");
     CHECK_EQUAL(jc4["fruits"].size(), 3);
     CHECK_EQUAL(jc5["emoji_string"].get_string(), "Toto je řetězec s několika smajlíky: 😀 😄 😊");
+
+    jc1.merge_keys(jc6);
+    CHECK(!jc1["string"].defined());
+    CHECK(!jc1["number"].defined());
+    CHECK_EQUAL(jc1["boolean"].get_bool(), false);
+    CHECK(jc1["null_value"] == nullptr);
+    CHECK_EQUAL(jc1["array"].size(), 3);
+    CHECK_EQUAL(jc1["array"][0].get_int(), 1);
+    CHECK_EQUAL(jc1["array"][1].get_int(), 2);
+    CHECK_EQUAL(jc1["array"][2].get_int(), 3);
+    CHECK(!jc1["object"].defined());
 
 
 }

@@ -179,6 +179,8 @@ protected:
     bool finish_state(StateBinArray &st, const Value &v);
     bool finish_state(StateBinObject &st, const Value &v);
 
+    Value adjustObject(Value v);
+
 
 };
 
@@ -565,7 +567,7 @@ inline bool Parser<Fn, format>::parse_state(StateObject &st) {
 
                 case '}':   if (st._reading_key) {
                                 ++_pos;
-                                _result = Value(std::move(st._data));
+                                _result = adjustObject(std::move(st._data));
                                 return false;
                             }
                 break;
@@ -845,6 +847,27 @@ inline Value unbinarize(std::string_view bin) {
 }
 
 
+template<ValuePreprocessor Fn, Format format>
+inline Value json::Parser<Fn, format>::adjustObject(Value v) {
+    const Value &del = v[undef_key_name];
+    if (del.defined()) {
+        auto cont = Container<KeyValue>::create_builder(v.size()+del.size());
+        for (const Value &x: del) {
+            cont.push_back(KeyValue(x, undefined));
+        }
+        for (const KeyValue &kv: v.keys()) {
+            std::string_view keyname = kv.key;
+            if (keyname.size() > undef_key_name.size() && keyname.compare(0, undef_key_name.size(), undef_key_name) == 0) {
+                keyname = keyname.substr(undef_key_name.size());
+                cont.push_back(KeyValue(keyname, kv.value));
+            } else {
+                cont.push_back(kv);
+            }
+        }
+        if (sort_object(*cont)) _is_error = true;
+        v = Value(std::move(cont));
+    }
+    return v;
 }
 
-
+}

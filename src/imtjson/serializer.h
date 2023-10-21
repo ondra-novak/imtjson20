@@ -48,6 +48,7 @@ protected:
     struct StateObject {
         Value::KeyValueIterator pos;
         Value::KeyValueIterator end;
+        Value _tmp;
     };
     using State = std::variant<Value, StateObject, StateArray>;
 
@@ -72,6 +73,7 @@ protected:
     void render_item(const AbstractCustomValue &v, Type);
 
     void render_binary_type_size(unsigned char type, std::uint64_t size);
+    void render_object(const Container<KeyValue> &v, Value &&tmp);
 };
 
 
@@ -175,24 +177,60 @@ inline void Serializer<format>::render_item(const Container<Value> &v, Type ) {
 template<Format format>
 inline void Serializer<format>::render_item(const Container<KeyValue> &v, Type ) {
     if constexpr(format == Format::text) {
+        //detect undefined keys
+        std::vector<Value> undef_keys;
+        bool need_transform = false;
+        for (const KeyValue &x: v) {
+            if (!x.value.defined()) {
+                undef_keys.push_back(x.key.to_value());
+                need_transform = true;
+            } else if (static_cast<std::string_view>(x.key) == undef_key_name) {
+                need_transform = true;
+            }
+        }
+        if (need_transform) {
+            auto cont = Container<KeyValue>::create_builder(v.size()+1);
+            cont.push_back(KeyValue(undef_key_name, undef_keys));
+            std::string buffer;
+            for (const KeyValue &x: v) {
+                if (x.value.defined()) {
+                    std::string_view keyname = x.key;
+                    if (keyname.compare(0,undef_key_name.size(), undef_key_name) == 0) {
+                        buffer.clear();
+                        buffer.append(undef_key_name);
+                        buffer.append(keyname);
+                        cont.push_back(KeyValue(buffer, x.value));
+                    } else {
+                        cont.push_back(x);
+                    }
+                }
+            }
+            const auto &ref = *cont;
+            render_object(ref, Value(std::move(cont)));
+            return;
+        }
+    }
+    render_object(v, {});
+}
+template<Format format>
+inline void Serializer<format>::render_object(const Container<KeyValue> &v, Value &&tmp) {
+    if constexpr(format == Format::text) {
         _out_buff.push_back('{');
     } else {
         render_binary_type_size(BinaryType::object, v.size());
     }
     auto pos = v.begin();
     auto end = v.end();
-    while (pos != end) {
+    if (pos != end) {
         const KeyValue &kv = *pos;
         ++pos;
-        if (format == Format::binary || kv.value.defined()) {
-            render_key(kv.key);
-            if constexpr(format == Format::text) {
-                _out_buff.push_back(':');
-            }
-            _stack.push_back(StateObject{pos, end});
-            render_value(kv.value);
-            return;
+        render_key(kv.key);
+        if constexpr(format == Format::text) {
+            _out_buff.push_back(':');
         }
+        _stack.push_back(StateObject{pos, end, std::move(tmp)});
+        render_value(kv.value);
+        return;
     }
     if constexpr(format == Format::text) {
         _out_buff.push_back('}');
